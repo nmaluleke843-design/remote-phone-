@@ -1,0 +1,8 @@
+{
+  "name": "remote-phone-server",
+  "version": "1.0.0",
+  "description": "Relay server and web controller for the RemotePhone Android app",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ws": "^8.18.0" }
+}

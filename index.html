@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RemotePhone</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --text:#e8eaf0; --muted:#8a92a3; --accent:#4f8cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px system-ui, sans-serif; min-height:100vh; }
+  .center { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; gap:14px; padding:20px; }
+  h1 { margin:0; font-size:22px; }
+  p { margin:0; color:var(--muted); max-width:360px; text-align:center; }
+  input, button { font:inherit; border-radius:10px; border:1px solid var(--line); padding:12px 14px; background:var(--panel); color:var(--text); }
+  input { width:240px; text-align:center; letter-spacing:4px; font-size:20px; }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:hover { filter:brightness(1.1); }
+  #err { color:#ff7a7a; min-height:20px; }
+  #app { display:none; height:100vh; grid-template-columns:1fr 220px; }
+  #stage { display:flex; align-items:center; justify-content:center; padding:12px; min-width:0; }
+  canvas { max-width:100%; max-height:calc(100vh - 24px); background:#000; border-radius:14px; border:1px solid var(--line); cursor:pointer; touch-action:none; }
+  #side { background:var(--panel); border-left:1px solid var(--line); padding:16px; display:flex; flex-direction:column; gap:10px; }
+  #side input { width:100%; letter-spacing:0; font-size:15px; text-align:left; }
+  #status { font-size:13px; color:var(--muted); }
+  @media (max-width:720px){ #app{grid-template-columns:1fr; grid-template-rows:1fr auto;} #side{border-left:0;border-top:1px solid var(--line);flex-direction:row;flex-wrap:wrap;} }
+</style>
+</head>
+<body>
+<div class="center" id="login">
+  <h1>RemotePhone</h1>
+  <p>Open the app on your Android phone, tap <b>Start sharing</b>, and enter the 8-digit code it shows.</p>
+  <input id="code" inputmode="numeric" maxlength="8" placeholder="00000000" autofocus>
+  <button class="primary" id="connect">Connect</button>
+  <div id="err"></div>
+</div>
+
+<div id="app">
+  <div id="stage"><canvas id="screen" width="540" height="1170"></canvas></div>
+  <div id="side">
+    <div id="status">Connecting…</div>
+    <button data-key="back">◀ Back</button>
+    <button data-key="home">● Home</button>
+    <button data-key="recents">▣ Recents</button>
+    <button data-key="notifications">Notifications</button>
+    <button data-key="scrollup">Scroll up</button>
+    <button data-key="scrolldown">Scroll down</button>
+    <input id="text" placeholder="Type text, press Enter">
+    <button data-key="backspace">⌫ Backspace</button>
+    <button id="disconnect">Disconnect</button>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ws = null;
+const canvas = $("screen"), ctx = canvas.getContext("2d");
+
+function connect() {
+  const code = $("code").value.trim();
+  if (!/^\d{8}$/.test(code)) { $("err").textContent = "Enter the 8-digit code from the phone."; return; }
+  $("err").textContent = "";
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws?role=viewer&code=${code}`);
+  ws.binaryType = "blob";
+  ws.onopen = () => { $("login").style.display = "none"; $("app").style.display = "grid"; $("status").textContent = "Connected"; };
+  ws.onmessage = async (e) => {
+    if (typeof e.data === "string") {
+      const m = JSON.parse(e.data);
+      if (m.type === "info") { canvas.width = m.w; canvas.height = m.h; }
+      if (m.type === "phone") $("status").textContent = m.connected ? "Connected" : "Phone disconnected";
+      return;
+    }
+    const bmp = await createImageBitmap(e.data);
+    if (canvas.width !== bmp.width || canvas.height !== bmp.height) { canvas.width = bmp.width; canvas.height = bmp.height; }
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+  };
+  ws.onclose = (e) => {
+    $("app").style.display = "none"; $("login").style.display = "flex";
+    const reasons = { 4004: "No phone is sharing with that code.", 4029: "Too many wrong codes. Try again in 10 minutes.", 4002: "Another viewer took over." };
+    $("err").textContent = reasons[e.code] || "Disconnected.";
+  };
+}
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+$("connect").onclick = connect;
+$("code").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
+$("disconnect").onclick = () => ws && ws.close();
+document.querySelectorAll("[data-key]").forEach((b) => b.onclick = () => send({ t: "key", k: b.dataset.key }));
+$("text").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.value) { send({ t: "text", v: e.target.value }); e.target.value = ""; }
+});
+
+// Mouse / touch -> tap or swipe (coordinates normalised 0..1)
+let down = null;
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)), px: e.clientX, py: e.clientY, t: performance.now() };
+}
+canvas.addEventListener("pointerdown", (e) => { canvas.setPointerCapture(e.pointerId); down = pos(e); });
+canvas.addEventListener("pointerup", (e) => {
+  if (!down) return;
+  const up = pos(e);
+  const moved = Math.hypot(up.px - down.px, up.py - down.py);
+  if (moved < 8) send({ t: "tap", x: up.x, y: up.y });
+  else send({ t: "swipe", x1: down.x, y1: down.y, x2: up.x, y2: up.y, d: Math.max(100, Math.min(1200, Math.round(up.t - down.t))) });
+  down = null;
+});
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const p = pos(e);
+  const dy = Math.sign(e.deltaY) * 0.25;
+  send({ t: "swipe", x1: p.x, y1: p.y, x2: p.x, y2: Math.min(1, Math.max(0, p.y - dy)), d: 250 });
+}, { passive: false });
+</script>
+</body>
+</html>
